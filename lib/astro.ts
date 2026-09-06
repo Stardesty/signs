@@ -485,3 +485,98 @@ const SIGN_RULERS: Record<SignName, string> = {
   Sagittarius: 'Jupiter', Capricorn: 'Saturn', Aquarius: 'Uranus', Pisces: 'Neptune',
 };
 
+/** Weight each body when computing element/modality balance. */
+const BALANCE_WEIGHT: Record<string, number> = {
+  Sun: 3, Moon: 3, ASC: 3, Mercury: 2, Venus: 2, Mars: 2,
+  Jupiter: 1.5, Saturn: 1.5, Uranus: 1, Neptune: 1, Pluto: 1,
+  NorthNode: 1, Chiron: 0.5, MC: 1.5,
+};
+
+export function computeChart(
+  id: string, birth: BirthData, houseSystem: HouseSystem = 'whole-sign',
+): Chart {
+  const utcHour = birth.hour - birth.tzOffset;
+  const jd = julianDay(birth.year, birth.month, birth.day, utcHour, birth.minute, 0);
+
+  const hasTime = !birth.timeUnknown;
+  const asc = hasTime ? ascendant(jd, birth.longitude, birth.latitude) : null;
+  const mc = hasTime ? midheaven(jd, birth.longitude) : null;
+  const cusps = hasTime && asc !== null && mc !== null
+    ? houseCusps(asc, mc, houseSystem) : null;
+
+  const placements: Placement[] = PLANETS.map((body) => {
+    const lon = planetLongitude(body, jd);
+    const sign = signOf(lon);
+    return {
+      body,
+      longitude: Number(lon.toFixed(4)),
+      sign,
+      degreeInSign: degreeInSign(lon),
+      house: cusps ? houseOf(lon, cusps) : null,
+      retrograde: isRetrograde(body, jd),
+      element: signElement(sign),
+      modality: signModality(sign),
+      ...(body === 'Chiron' ? { approximate: true } : {}),
+    };
+  });
+
+  // Angles participate in aspects as pseudo-bodies.
+  const aspectBodies: { name: string; lon: number }[] = placements.map((p) => ({
+    name: p.body, lon: p.longitude,
+  }));
+  if (asc !== null) aspectBodies.push({ name: 'ASC', lon: asc });
+  if (mc !== null) aspectBodies.push({ name: 'MC', lon: mc });
+
+  const aspects: Aspect[] = [];
+  for (let i = 0; i < aspectBodies.length; i++) {
+    for (let j = i + 1; j < aspectBodies.length; j++) {
+      // The node/angle pairs are noise; skip the least meaningful combos.
+      const pair = [aspectBodies[i].name, aspectBodies[j].name];
+      if (pair.includes('ASC') && pair.includes('MC')) continue;
+      const found = findAspect(aspectBodies[i].lon, aspectBodies[j].lon, pair[0], pair[1]);
+      if (found) aspects.push(found);
+    }
+  }
+  aspects.sort((x, y) => y.weight - x.weight);
+
+  const elementBalance: Record<Element, number> = { Fire: 0, Earth: 0, Air: 0, Water: 0 };
+  const modalityBalance: Record<Modality, number> = { Cardinal: 0, Fixed: 0, Mutable: 0 };
+  const polarityBalance = { Yang: 0, Yin: 0 };
+  const signTally: Record<string, number> = {};
+
+  const balanceItems = [...placements.map((p) => ({ body: p.body, sign: p.sign }))];
+  if (asc !== null) balanceItems.push({ body: 'ASC', sign: signOf(asc) });
+  if (mc !== null) balanceItems.push({ body: 'MC', sign: signOf(mc) });
+
+  for (const item of balanceItems) {
+    const w = BALANCE_WEIGHT[item.body] ?? 1;
+    elementBalance[signElement(item.sign)] += w;
+    modalityBalance[signModality(item.sign)] += w;
+    polarityBalance[signPolarity(item.sign)] += w;
+    signTally[item.sign] = (signTally[item.sign] ?? 0) + w;
+  }
+
+  const dominantSign = (Object.entries(signTally)
+    .sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'Aries') as SignName;
+
+  const chartRuler = asc !== null ? SIGN_RULERS[signOf(asc)] : null;
+
+  return {
+    id, birth, jd, placements,
+    ascendant: asc === null ? null : Number(asc.toFixed(4)),
+    midheaven: mc === null ? null : Number(mc.toFixed(4)),
+    cusps: cusps ? cusps.map((c) => Number(c.toFixed(4))) : null,
+    aspects, elementBalance, modalityBalance, polarityBalance,
+    dominantSign, chartRuler, houseSystem,
+  };
+}
+
+/** Convenience: the "big three". */
+export function bigThree(chart: Chart) {
+  const sun = chart.placements.find((p) => p.body === 'Sun')!;
+  const moon = chart.placements.find((p) => p.body === 'Moon')!;
+  return {
+    sun: sun.sign,
+    moon: moon.sign,
+    rising: chart.ascendant === null ? null : signOf(chart.ascendant),
+   };
